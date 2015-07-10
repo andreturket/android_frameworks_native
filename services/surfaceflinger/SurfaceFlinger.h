@@ -59,9 +59,11 @@
 
 #include "FrameRateHelper.h"
 
+
 #ifdef SAMSUNG_HDMI_SUPPORT
 #include "SecHdmiClient.h"
 #endif
+
 
 namespace android {
 
