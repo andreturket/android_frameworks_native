@@ -86,11 +86,12 @@ status_t SensorManager::assertStateLocked() const {
         };
 
         mDeathObserver = new DeathObserver(*const_cast<SensorManager *>(this));
-        mSensorServer->asBinder()->linkToDeath(mDeathObserver);
+        IInterface::asBinder(mSensorServer)->linkToDeath(mDeathObserver);
 
         mSensors = mSensorServer->getSensorList();
         size_t count = mSensors.size();
-        mSensorList = (Sensor const**)malloc(count * sizeof(Sensor*));
+        mSensorList =
+                static_cast<Sensor const**>(malloc(count * sizeof(Sensor*)));
         for (size_t i=0 ; i<count ; i++) {
             mSensorList[i] = mSensors.array() + i;
         }
@@ -106,10 +107,10 @@ ssize_t SensorManager::getSensorList(Sensor const* const** list) const
     Mutex::Autolock _l(mLock);
     status_t err = assertStateLocked();
     if (err < 0) {
-        return ssize_t(err);
+        return static_cast<ssize_t>(err);
     }
     *list = mSensorList;
-    return mSensors.size();
+    return static_cast<ssize_t>(mSensors.size());
 }
 
 Sensor const* SensorManager::getDefaultSensor(int type)

@@ -16,6 +16,7 @@
 
 #define LOG_TAG "Sensors"
 
+#include <algorithm>
 #include <stdint.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -30,6 +31,8 @@
 #include <gui/ISensorEventConnection.h>
 
 #include <android/sensor.h>
+
+using std::min;
 
 // ----------------------------------------------------------------------------
 namespace android {
@@ -68,14 +71,14 @@ ssize_t SensorEventQueue::read(ASensorEvent* events, size_t numEvents) {
         if (err < 0) {
             return err;
         }
-        mAvailable = err;
+        mAvailable = static_cast<size_t>(err);
         mConsumed = 0;
     }
-    size_t count = numEvents < mAvailable ? numEvents : mAvailable;
-    memcpy(events, mRecBuffer + mConsumed, count*sizeof(ASensorEvent));
+    size_t count = min(numEvents, mAvailable);
+    memcpy(events, mRecBuffer + mConsumed, count * sizeof(ASensorEvent));
     mAvailable -= count;
     mConsumed += count;
-    return count;
+    return static_cast<ssize_t>(count);
 }
 
 sp<Looper> SensorEventQueue::getLooper() const
@@ -157,7 +160,7 @@ void SensorEventQueue::sendAck(const ASensorEvent* events, int count) {
         ssize_t size = ::send(mSensorChannel->getFd(), &mNumAcksToSend, sizeof(mNumAcksToSend),
                 MSG_DONTWAIT | MSG_NOSIGNAL);
         if (size < 0) {
-            ALOGE("sendAck failure %d %d", size, mNumAcksToSend);
+            ALOGE("sendAck failure %zd %d", size, mNumAcksToSend);
         } else {
             mNumAcksToSend = 0;
         }

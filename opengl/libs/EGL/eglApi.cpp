@@ -80,6 +80,7 @@ struct extention_map_t {
 extern char const * const gBuiltinExtensionString =
         "EGL_KHR_get_all_proc_addresses "
         "EGL_ANDROID_presentation_time "
+        "EGL_KHR_swap_buffers_with_damage "
         ;
 extern char const * const gExtensionString  =
         "EGL_KHR_image "                        // mandatory
@@ -100,6 +101,9 @@ extern char const * const gExtensionString  =
         "EGL_ANDROID_image_native_buffer "      // mandatory
         "EGL_KHR_wait_sync "                    // strongly recommended
         "EGL_ANDROID_recordable "               // mandatory
+        "EGL_KHR_partial_update "               // strongly recommended
+        "EGL_EXT_buffer_age "                   // strongly recommended with partial_update
+        "EGL_KHR_create_context_no_error "
         ;
 
 // extensions not exposed to applications but used by the ANDROID system
@@ -152,6 +156,14 @@ static const extention_map_t sExtensionMap[] = {
     // EGL_ANDROID_presentation_time
     { "eglPresentationTimeANDROID",
             (__eglMustCastToProperFunctionPointerType)&eglPresentationTimeANDROID },
+
+    // EGL_KHR_swap_buffers_with_damage
+    { "eglSwapBuffersWithDamageKHR",
+            (__eglMustCastToProperFunctionPointerType)&eglSwapBuffersWithDamageKHR },
+
+    // EGL_KHR_partial_update
+    { "eglSetDamageRegionKHR",
+            (__eglMustCastToProperFunctionPointerType)&eglSetDamageRegionKHR },
 };
 
 /*
@@ -381,20 +393,15 @@ EGLBoolean eglGetConfigAttrib(EGLDisplay dpy, EGLConfig config,
 // Turn linear formats into corresponding sRGB formats when colorspace is
 // EGL_GL_COLORSPACE_SRGB_KHR, or turn sRGB formats into corresponding linear
 // formats when colorspace is EGL_GL_COLORSPACE_LINEAR_KHR. In any cases where
-// the modification isn't possible, the original format is returned.
-static int modifyFormatColorspace(int fmt, EGLint colorspace) {
+// the modification isn't possible, the original dataSpace is returned.
+static android_dataspace modifyBufferDataspace( android_dataspace dataSpace,
+                                                EGLint colorspace) {
     if (colorspace == EGL_GL_COLORSPACE_LINEAR_KHR) {
-        switch (fmt) {
-            case HAL_PIXEL_FORMAT_sRGB_A_8888: return HAL_PIXEL_FORMAT_RGBA_8888;
-            case HAL_PIXEL_FORMAT_sRGB_X_8888: return HAL_PIXEL_FORMAT_RGBX_8888;
-        }
+        return HAL_DATASPACE_SRGB_LINEAR;
     } else if (colorspace == EGL_GL_COLORSPACE_SRGB_KHR) {
-        switch (fmt) {
-            case HAL_PIXEL_FORMAT_RGBA_8888: return HAL_PIXEL_FORMAT_sRGB_A_8888;
-            case HAL_PIXEL_FORMAT_RGBX_8888: return HAL_PIXEL_FORMAT_sRGB_X_8888;
-        }
+        return HAL_DATASPACE_SRGB;
     }
-    return fmt;
+    return dataSpace;
 }
 
 EGLSurface eglCreateWindowSurface(  EGLDisplay dpy, EGLConfig config,
@@ -421,37 +428,10 @@ EGLSurface eglCreateWindowSurface(  EGLDisplay dpy, EGLConfig config,
         // of our native format. So if sRGB gamma is requested, we have to
         // modify the EGLconfig's format before setting the native window's
         // format.
-#if WORKAROUND_BUG_10194508
-#warning "WORKAROUND_10194508 enabled"
-        EGLint format;
-        if (!cnx->egl.eglGetConfigAttrib(iDpy, config, EGL_NATIVE_VISUAL_ID,
-                &format)) {
-            ALOGE("eglGetConfigAttrib(EGL_NATIVE_VISUAL_ID) failed: %#x",
-                    eglGetError());
-            format = 0;
-        }
-        if (attrib_list) {
-            for (const EGLint* attr = attrib_list; *attr != EGL_NONE;
-                    attr += 2) {
-                if (*attr == EGL_GL_COLORSPACE_KHR &&
-                        dp->haveExtension("EGL_KHR_gl_colorspace")) {
-                    if (ENABLE_EGL_KHR_GL_COLORSPACE) {
-                        format = modifyFormatColorspace(format, *(attr+1));
-                    } else {
-                        // Normally we'd pass through unhandled attributes to
-                        // the driver. But in case the driver implements this
-                        // extension but we're disabling it, we want to prevent
-                        // it getting through -- support will be broken without
-                        // our help.
-                        ALOGE("sRGB window surfaces not supported");
-                        return setError(EGL_BAD_ATTRIBUTE, EGL_NO_SURFACE);
-                    }
-                }
-            }
-        }
-#else
+
         // by default, just pick RGBA_8888
         EGLint format = HAL_PIXEL_FORMAT_RGBA_8888;
+        android_dataspace dataSpace = HAL_DATASPACE_UNKNOWN;
 
         EGLint a = 0;
         cnx->egl.eglGetConfigAttrib(iDpy, config, EGL_ALPHA_SIZE, &a);
@@ -477,7 +457,7 @@ EGLSurface eglCreateWindowSurface(  EGLDisplay dpy, EGLConfig config,
             for (const EGLint* attr = attrib_list; *attr != EGL_NONE; attr += 2) {
                 if (*attr == EGL_GL_COLORSPACE_KHR) {
                     if (ENABLE_EGL_KHR_GL_COLORSPACE) {
-                        format = modifyFormatColorspace(format, *(attr+1));
+                        dataSpace = modifyBufferDataspace(dataSpace, *(attr+1));
                     } else {
                         // Normally we'd pass through unhandled attributes to
                         // the driver. But in case the driver implements this
@@ -490,11 +470,21 @@ EGLSurface eglCreateWindowSurface(  EGLDisplay dpy, EGLConfig config,
                 }
             }
         }
-#endif
+
         if (format != 0) {
             int err = native_window_set_buffers_format(window, format);
             if (err != 0) {
                 ALOGE("error setting native window pixel format: %s (%d)",
+                        strerror(-err), err);
+                native_window_api_disconnect(window, NATIVE_WINDOW_API_EGL);
+                return setError(EGL_BAD_NATIVE_WINDOW, EGL_NO_SURFACE);
+            }
+        }
+
+        if (dataSpace != 0) {
+            int err = native_window_set_buffers_data_space(window, dataSpace);
+            if (err != 0) {
+                ALOGE("error setting native window pixel dataSpace: %s (%d)",
                         strerror(-err), err);
                 native_window_api_disconnect(window, NATIVE_WINDOW_API_EGL);
                 return setError(EGL_BAD_NATIVE_WINDOW, EGL_NO_SURFACE);
@@ -572,6 +562,15 @@ EGLBoolean eglDestroySurface(EGLDisplay dpy, EGLSurface surface)
         return setError(EGL_BAD_SURFACE, EGL_FALSE);
 
     egl_surface_t * const s = get_surface(surface);
+    ANativeWindow* window = s->win.get();
+    if (window) {
+        int result = native_window_api_disconnect(window, NATIVE_WINDOW_API_EGL);
+        if (result != OK) {
+            ALOGE("eglDestroySurface: native_window_api_disconnect (win=%p) "
+                  "failed (%#x)",
+                  window, result);
+        }
+    }
     EGLBoolean result = s->cnx->egl.eglDestroySurface(dp->disp.dpy, s->surface);
     if (result == EGL_TRUE) {
         _s.terminate();
@@ -1043,7 +1042,8 @@ private:
     Mutex mMutex;
 };
 
-EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface draw)
+EGLBoolean eglSwapBuffersWithDamageKHR(EGLDisplay dpy, EGLSurface draw,
+        EGLint *rects, EGLint n_rects)
 {
     ATRACE_CALL();
     clearError();
@@ -1102,7 +1102,38 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface draw)
         }
     }
 
-    return s->cnx->egl.eglSwapBuffers(dp->disp.dpy, s->surface);
+    if (n_rects == 0) {
+        return s->cnx->egl.eglSwapBuffers(dp->disp.dpy, s->surface);
+    }
+
+    Vector<android_native_rect_t> androidRects;
+    for (int r = 0; r < n_rects; ++r) {
+        int offset = r * 4;
+        int x = rects[offset];
+        int y = rects[offset + 1];
+        int width = rects[offset + 2];
+        int height = rects[offset + 3];
+        android_native_rect_t androidRect;
+        androidRect.left = x;
+        androidRect.top = y + height;
+        androidRect.right = x + width;
+        androidRect.bottom = y;
+        androidRects.push_back(androidRect);
+    }
+    native_window_set_surface_damage(s->win.get(), androidRects.array(),
+            androidRects.size());
+
+    if (s->cnx->egl.eglSwapBuffersWithDamageKHR) {
+        return s->cnx->egl.eglSwapBuffersWithDamageKHR(dp->disp.dpy, s->surface,
+                rects, n_rects);
+    } else {
+        return s->cnx->egl.eglSwapBuffers(dp->disp.dpy, s->surface);
+    }
+}
+
+EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
+{
+    return eglSwapBuffersWithDamageKHR(dpy, surface, NULL, 0);
 }
 
 EGLBoolean eglCopyBuffers(  EGLDisplay dpy, EGLSurface surface,
@@ -1590,4 +1621,33 @@ EGLuint64NV eglGetSystemTimeNV()
     }
 
     return setErrorQuiet(EGL_BAD_DISPLAY, 0);
+}
+
+// ----------------------------------------------------------------------------
+// Partial update extension
+// ----------------------------------------------------------------------------
+EGLBoolean eglSetDamageRegionKHR(EGLDisplay dpy, EGLSurface surface,
+        EGLint *rects, EGLint n_rects)
+{
+    clearError();
+
+    const egl_display_ptr dp = validate_display(dpy);
+    if (!dp) {
+        setError(EGL_BAD_DISPLAY, EGL_FALSE);
+        return EGL_FALSE;
+    }
+
+    SurfaceRef _s(dp.get(), surface);
+    if (!_s.get()) {
+        setError(EGL_BAD_SURFACE, EGL_FALSE);
+        return EGL_FALSE;
+    }
+
+    egl_surface_t const * const s = get_surface(surface);
+    if (s->cnx->egl.eglSetDamageRegionKHR) {
+        return s->cnx->egl.eglSetDamageRegionKHR(dp->disp.dpy, s->surface,
+                rects, n_rects);
+    }
+
+    return EGL_FALSE;
 }

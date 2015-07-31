@@ -858,7 +858,6 @@ size_t EventHub::getEvents(int timeoutMillis, RawEvent* buffer, size_t bufferSiz
                                     int(iev.time.tv_sec), int(iev.time.tv_usec));
                         }
 
-#ifdef HAVE_POSIX_CLOCKS
                         // Use the time specified in the event instead of the current time
                         // so that downstream code can get more accurate estimates of
                         // event dispatch latency from the time the event is enqueued onto
@@ -909,9 +908,6 @@ size_t EventHub::getEvents(int timeoutMillis, RawEvent* buffer, size_t bufferSiz
                                         event->when, time, now);
                             }
                         }
-#else
-                        event->when = now;
-#endif
                         event->deviceId = deviceId;
                         event->type = iev.type;
                         event->code = iev.code;
@@ -1443,7 +1439,7 @@ void EventHub::setLedForController(Device* device) {
 }
 
 bool EventHub::hasKeycodeLocked(Device* device, int keycode) const {
-    if (!device->keyMap.haveKeyLayout() || !device->keyBitmask) {
+    if (!device->keyMap.haveKeyLayout()) {
         return false;
     }
     
@@ -1461,7 +1457,7 @@ bool EventHub::hasKeycodeLocked(Device* device, int keycode) const {
 }
 
 status_t EventHub::mapLed(Device* device, int32_t led, int32_t* outScanCode) const {
-    if (!device->keyMap.haveKeyLayout() || !device->ledBitmask) {
+    if (!device->keyMap.haveKeyLayout()) {
         return NAME_NOT_FOUND;
     }
 

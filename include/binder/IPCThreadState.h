@@ -22,7 +22,7 @@
 #include <binder/ProcessState.h>
 #include <utils/Vector.h>
 
-#ifdef HAVE_WIN32_PROC
+#if defined(_WIN32)
 typedef  int  uid_t;
 #endif
 
@@ -39,8 +39,8 @@ public:
             
             status_t            clearLastError();
 
-            int                 getCallingPid() const;
-            int                 getCallingUid() const;
+            pid_t               getCallingPid() const;
+            uid_t               getCallingUid() const;
 
             void                setStrictModePolicy(int32_t policy);
             int32_t             getStrictModePolicy() const;
